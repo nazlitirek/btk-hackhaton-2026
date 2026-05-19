@@ -1,0 +1,98 @@
+# ============================================================
+# Data / Large Files
+# ============================================================
+data/images/
+
+# ============================================================
+# Python / Backend
+# ============================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env.bak
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+
+# ============================================================
+# Environment & Secrets
+# ============================================================
+.env
+.env.*
+!.env.example
+
+# ============================================================
+# Node / Frontend (Vite + React)
+# ============================================================
+node_modules/
+dist/
+dist-ssr/
+*.local
+.cache/
+
+# Vite
+.vite/
+
+# Build output
+frontend/dist/
+frontend/build/
+
+# ============================================================
+# Logs
+# ============================================================
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ============================================================
+# OS / Editor
+# ============================================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# JetBrains (PyCharm, WebStorm, etc.)
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# ============================================================
+# Misc
+# ============================================================
+*.bak
+*.tmp
+*.swp
+*.swo
