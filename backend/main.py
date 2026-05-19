@@ -7,8 +7,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional, List
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
+import time
 
 # Load env variables from local directory
 load_dotenv()
@@ -17,8 +19,26 @@ load_dotenv()
 api_key = os.environ.get("GEMINI_API_KEY")
 if not api_key:
     raise RuntimeError("GEMINI_API_KEY not found in environment variables.")
-genai.configure(api_key=api_key)
-model = genai.GenerativeModel("gemini-2.0-flash") # gemini-2.0-flash: higher free-tier rate limits
+client = genai.Client(api_key=api_key)
+MODEL_ID = "gemini-2.5-flash"
+
+def generate_content_with_retry(client, model, contents, config, retries=3, delay=1.5):
+    for i in range(retries):
+        try:
+            return client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config
+            )
+        except Exception as e:
+            err_msg = str(e)
+            if "503" in err_msg or "429" in err_msg or "UNAVAILABLE" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                if i < retries - 1:
+                    print(f"Gemini API error: {e}. Retrying in {delay} seconds...")
+                    time.sleep(delay)
+                    delay *= 2
+                    continue
+            raise e
 
 app = FastAPI()
 
@@ -158,16 +178,8 @@ def llm_search(request: ChatSearchRequest):
     if not conn:
         raise HTTPException(status_code=500, detail="Database connection failed")
 
-    # Build Gemini chat history format
-    gemini_history = []
-    for msg in request.history:
-        gemini_history.append({
-            "role": msg.role,
-            "parts": [msg.content]
-        })
-
     # System instruction: filter extraction
-    system_prompt = """Sen bir online giyim mağazasının yapay zeka asistanısın. Kullanıcı sohbet geçmişini dikkate alarak ürün arama parametrelerini JSON formatında çıkar.
+    system_instruction = """Sen bir online giyim mağazasının yapay zeka asistanısın. Kullanıcı sohbet geçmişini dikkate alarak ürün arama parametrelerini JSON formatında çıkar.
 
 Çıkarılabilecek alanlar (sadece bahsedilenleri dahil et):
 - category: "Tişörtler", "Gömlekler", "Pantolonlar", "Elbiseler", "Kotlar", "Spor Ayakkabılar", "Günlük Ayakkabılar", "Topuklu Ayakkabılar", "Sandaletler", "Üstler", "Şortlar", "El Çantaları", "Sırt Çantaları", "Saatler", "Güneş Gözlükleri"
@@ -199,12 +211,29 @@ YAŞAM TARZI → STYLE TAG EŞLEMESİ (kullanıcı bunları söylerse q'ya karş
 
 SADECE ham JSON döndür, açıklama veya markdown kullanma."""
 
-    filter_prompt = f'Kullanıcı sorgusu: "{request.query}"\n\nJSON filtrelerini çıkar:'
+    # Build Gemini chat history in new SDK format
+    gemini_history = []
+    for msg in request.history:
+        role = msg.role  # "user" or "model"
+        gemini_history.append(
+            types.Content(role=role, parts=[types.Part(text=msg.content)])
+        )
 
     try:
-        # Use multi-turn chat with history
-        chat = model.start_chat(history=gemini_history)
-        filter_response = chat.send_message(f"{system_prompt}\n\n{filter_prompt}")
+        # ── STEP 1: Extract filters via LLM ─────────────────────────────────
+        filter_prompt = f'Kullanıcı sorgusu: "{request.query}"\n\nJSON filtrelerini çıkar:'
+
+        filter_response = generate_content_with_retry(
+            client=client,
+            model=MODEL_ID,
+            contents=gemini_history + [
+                types.Content(role="user", parts=[types.Part(text=filter_prompt)])
+            ],
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.1,  # low temp for reliable JSON
+            ),
+        )
 
         llm_text = filter_response.text.strip()
         if llm_text.startswith("```json"):
@@ -215,7 +244,7 @@ SADECE ham JSON döndür, açıklama veya markdown kullanma."""
         filters = json.loads(llm_text)
         print("LLM Parsed Filters:", json.dumps(filters, ensure_ascii=True))
 
-        # Build SQL query from filters
+        # ── STEP 2: Build SQL query from filters ─────────────────────────────
         cur = conn.cursor(cursor_factory=RealDictCursor)
         filter_conditions = ""
         params = []
@@ -256,24 +285,33 @@ SADECE ham JSON döndür, açıklama veya markdown kullanma."""
         products = cur.fetchall()
         cur.close()
 
-        # Generate natural language summary — reuse the same chat session (no extra API call)
+        # ── STEP 3: Generate natural language summary ─────────────────────────
         product_names = [p["title"] for p in products[:5]]
-        if product_names:
-            names_str = ', '.join(product_names)
-        else:
-            names_str = 'Hiç ürün bulunamadı'
+        names_str = ', '.join(product_names) if product_names else 'Hiç ürün bulunamadı'
         summary_prompt = (
             f'Kullanıcı "{request.query}" diye sordu. '
-            f'Veritabanimda {total_count} eslesme buldum. '
-            f'Ilk urunler: {names_str}. '
-            f'Kullaniciya kisaca Turkce samimi bir yani ver (2-3 cumle), '
-            f'urün sayisini belirt, one cikan ozellikleri paylas. Emoji kullanabilirsin.'
+            f'Veritabanımda {total_count} eşleşme buldum. '
+            f'İlk ürünler: {names_str}. '
+            f'Kullanıcıya kısaca Türkçe samimi bir yanıt ver (2-3 cümle), '
+            f'ürün sayısını belirt, öne çıkan özellikleri paylaş. Emoji kullanabilirsin.'
         )
+        summary_system = "Sen samimi ve yardımsever bir alışveriş asistanısın. Kısa, doğal Türkçe yanıtlar ver."
         try:
-            summary_response = chat.send_message(summary_prompt)
+            summary_response = generate_content_with_retry(
+                client=client,
+                model=MODEL_ID,
+                contents=gemini_history + [
+                    types.Content(role="user", parts=[types.Part(text=filter_prompt)]),
+                    types.Content(role="model", parts=[types.Part(text=llm_text)]),
+                    types.Content(role="user", parts=[types.Part(text=summary_prompt)]),
+                ],
+                config=types.GenerateContentConfig(
+                    system_instruction=summary_system,
+                    temperature=0.7,
+                ),
+            )
             ai_summary = summary_response.text.strip()
         except Exception:
-            # If rate-limited on summary, build a simple fallback
             if total_count > 0:
                 ai_summary = f"{total_count} ürün bulundu! En iyi seçenekler listeleniyor. 🛍️"
             else:
